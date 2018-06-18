@@ -10,6 +10,11 @@ Logo          : True
 
 深度学习最终要与具体行业场景有效率地结合起来才能发挥出其效益来。当下的整个深度学习已经行成了良好的产业链体系。最下端的是用于深度学习加速的各种硬件芯片如CPU/GPU/FPGA/ASIC专用芯片等。目前此领域里面GPU凭其优良的超多弱核心并行计算能力独领风骚；但CPU在推理加速、成本等方面也挺有竞争力；FPGA凭其灵活性也非常适宜于进行AI方案的原型设计，但因其开发难度较大，生态相对较缺乏，当下大公司里面大规模部署应用FPGA的唯有微软；至于ASIC专用芯片，可谓是给了诸多有心在AI半导体上面实现弯道超车的公司一个很好的机会，尤其是那些有着大规模机器学习用户，可以基于上层封装提供AI云计算实例服务的公司如Google就声势浩大地推出了自己快速迭代着的TPU，号称常规模型（如Resnet-50）加速快于最新的GPU，同时功耗更为节省，其它像Amazon，Facebook，Ali等云计算公司也在搞自己的AI专用ASIC芯片。此外一些创业型公司也对此雄心勃勃，国内已经涌现出了一堆此类的独角兽像卖自家矿机发了大财的Bit大陆，技术势力雄厚的地平线等等。还有些手机大厂则将精力用在了终端一侧的AI芯片研发像华为、苹果等已经有了自己的AI芯片并部署在了自己的手机新品当中，其它像小米、三星等也在纷纷跟进。需要提下的是ARM这个在移动时代的主要得意者也于最近发布了自己家设计的用于AI加速的各种硬件IP。
 
+![AI芯片]
+
+[AI芯片]: images/AI-.JPG "AI芯片" { width:auto; max-width:90% }
+
+
 计算芯片向上走则是将一些基本运算如矩阵乘积、各类型卷积运算等结合硬件平台优化过了的数学计算库如用于Intel CPU端的MKL/MKLDNN，用于nVidia GPU的CUDA/cuDNN，用于FPGA专用DNN网络加速过的openCL，还有针对各大ASIC芯片产商针对自己ASIC加速过了的种种计算库套件。这些数学计算库基本由AI芯片产商自己来完成，目的即在于借用软件的力量给自家的硬件以强大的驱动力。一般他们会选择将优化过了的核心程序开源、公布出来为自己的客户所借鉴、使用，最终通过AI芯片的出售来获得价值。值得一提的是nVIDIA在基于CUDA/cuDNN上面的多年耕耘，相关社区、生态的耐心培养直接带来了它们今天的巨大成功。现在半导体公司已经再不同往日只需要卖出芯片即可了。芯片相关的软件库（并行计算库等）的性能，对用户提供API的友好性，用户社区的培养，用户支持的力度等等软实力真正是愈益重要。
 
 底层计算库再向上走则是使用这些优化过了的数学计算库来完成基本类型计算，然后将之抽象封装后向上提供出友好用户API的深度学习框架。这些深度学习框架是我们软件人员开发应用的基本工具。当前最流行的框架有Google的Tensorflow，Facebook的Pytorch，Amazon的Mxnet，微软的CNTK，当然还有传统社区在维护的bvlc/Caffe等等。它们大都提供类似的功能，相似的API用于用户程序构建计算图，并能将图方便地导入、导出为序列化文件，还提供了基于Framework level对图的一些优化如合并(fusion)，去重（典型的如CSE），并行计算（通过使用OMP等并行库）等，此外还有一些功能如用于进行内存分配、管理及线程执行、调度、检测的session/workspace等，当然还有用于具体执行某计算的op / kernel等，这也是常规计算优化的核心所在。
@@ -32,7 +37,7 @@ Logo          : True
 
 * Tensorflow中Graph构造的描述可见于class Graph当中（可在core/graph/graph.h中找到其定义）
 
-'''
+<pre>
 class Graph {
  public:
   // Constructs a graph with a single SOURCE (always id kSourceId) and a
@@ -51,8 +56,7 @@ class Graph {
   // OpRegistryInterface backing `flib_def` must still have the lifetime of the
   // graph though.
   explicit Graph(const FunctionLibraryDefinition& flib_def);
-  
-'''
+</pre>
 
 以上构造函数当中，我们看到Graph只需引入一个参数即OpRegistryInterface或FunctionLibraryDefinition。这两个参数提供了具体每个节点的实际执行定义。在我们构建计算图的时候，我们找到一个node的nodeDef（通常是基于google protocol buffer协议的node参数定义）后，会在OpRegistryInterface或FunctionLibraryDefinition当中去获取其具体的类型实现。也就是说我们如果实现了一个在某硬件平台上优化过了的Op或一种崭新的Op操作，为了将此操作能够作为计算图的一个节点为我们的模型所用，那么需要将此新创建的Op实现函数注册于OpRegistryInterface或FunctionLibraryDefinition结构当中。
 
@@ -61,7 +65,7 @@ class Graph {
 
 其函数接口如下。具体的定义可见于core/graph/graph.cc当中。本身实现起来因为是使用了指针链表结构的DAG所以还是比较简单、容易理解的，在此就不多说了。
 
-'''
+<pre>
   // Adds a new node to this graph, and returns it. Infers the Op and
   // input/output types for the node. *this owns the returned instance.
   // Returns nullptr and sets *status on error.
@@ -89,23 +93,23 @@ class Graph {
   // edge from `new_src` to `dst` is created. The NodeDef associated with `dst`
   // is also updated.
   Status UpdateEdge(Node* new_src, int new_src_index, Node* dst, int dst_index);
-'''
+</pre>
 
 * 图之上的Op函数库
 
 class graph中有一个类成员为 FunctionLibraryDefinition ops_，其中包含了所有已知的具体类型的Op函数定义。而我们可利用以下函数来增加、拓展其Op函数库。
-'''
+<pre>
   // Adds the function and gradient definitions in `fdef_lib` to this graph's op
   // registry. Ignores duplicate functions, and returns a bad status if an
   // imported function differs from an existing function or op with the same
   // name.
   Status AddFunctionLibrary(const FunctionDefLibrary& fdef_lib);
-'''
+</pre>
 
 * Node节点对应的宿主设备
 
 Tensorflow当中计算图的执行是并发的。图上的每个Node都可被分布在不同的计算设备上计算。TF有提供API可以让我们指定某个Op操作的宿主设备。当然也有函数用来提供相应的查询操作。如下所示，见名可知其义。
-'''
+<pre>
   const string& get_assigned_device_name(const Node& node) const {
     return device_names_[node.assigned_device_name_index()];
   }
@@ -118,7 +122,7 @@ Tensorflow当中计算图的执行是并发的。图上的每个Node都可被分
   void set_assigned_device_name(Node* node, const string& device_name) {
     node->assigned_device_name_index_ = InternDeviceName(device_name);
   }
-'''
+</pre>
 
 # 参考文献
 * TensorFlow: A System for Large-Scale Machine Learning, 2016
