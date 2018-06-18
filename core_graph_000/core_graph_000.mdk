@@ -1,4 +1,4 @@
-Title         : Tensorflow核心代码解析之计算图篇其一
+Title         : Tensorflow核心代码解析之计算图篇其一：计算图结构初探
 Author        : manofmountain
 Logo          : True
 
@@ -18,10 +18,108 @@ Logo          : True
 
 当下对于如何使用Tensorflow来开发一个AI程序，构建深度学习模型并进行训练或推理的文章已经很多了。本系列单元中笔者想试着跟大家一起理一下它框架核心的一些代码实现。无益它对于我们基于TF做一些开发，加深对TF的理解是很有帮助的。此外TF框架的设计、代码实现非常良好，对它们的理解、梳理清楚对于我们日常的软件设计、开发也会有较强的工程借鉴意义。
 
-* Read the [reference manual].
-* Explore the upper-right toolbox menu to discover how Markdown works. 
-* `Alt-Q` reformats the current paragraph.
+# 计算图
 
-Enjoy!
+计算图（Graph）描述了一组需要依次序完成的计算单元以及表示这些计算单元之间相互依赖的关系。一般的深度学习模型都会被分化组装成一个单向无环图（DAG）来执行。图当中的结点（node）用来表示某一具体的计算单元（如Multmul结点表示两个张量之间的乘积，Conv结点则表示两个张量之间的卷积计算）。图上的片（edge）则被用来表示两个结点之间的依赖关系。比如A结点的第i个输出来自于B结点的第j输入，那么就会构成(B,j) -> (A,i)这么一条边来，如此结点A的执行就对结点B构成依赖。
 
-[reference manual]: http://research.microsoft.com/en-us/um/people/daan/madoko/doc/reference.html  "Madoko reference manual"
+在Tensorflow的计算图中，一般会包含两个特殊的结点分别为Source节点（也称Start节点）与Sink节点（也称为Finish节点）。其中Source节点表示此节点不依赖于任何其它节点作为其输入，而Sink节点则表示该节点并无任何输出来作为其它节点的输入。
+
+![Tensorflow计算图示例]
+
+[Tensorflow计算图示例]: images/Tensorflow-.JPG "Tensorflow计算图示例" { width:auto; max-width:90% }
+
+# class graph代码实例
+
+* Tensorflow中Graph构造的描述可见于class Graph当中（可在core/graph/graph.h中找到其定义）
+
+'''
+class Graph {
+ public:
+  // Constructs a graph with a single SOURCE (always id kSourceId) and a
+  // single SINK (always id kSinkId) node, and an edge from SOURCE->SINK.
+  //
+  // The graph can hold ops found in registry. `registry`s lifetime must be at
+  // least that of the constructed graph's.
+  explicit Graph(const OpRegistryInterface* registry);
+
+  // Constructs a graph with a single SOURCE (always id kSourceId) and a
+  // single SINK (always id kSinkId) node, and an edge from SOURCE->SINK.
+  //
+  // The graph can hold ops found in `flib_def`. Unlike the constructor taking
+  // an OpRegistryInterface, this constructor copies the function definitions in
+  // `flib_def` so its lifetime may be shorter than that of the graph's. The
+  // OpRegistryInterface backing `flib_def` must still have the lifetime of the
+  // graph though.
+  explicit Graph(const FunctionLibraryDefinition& flib_def);
+  
+'''
+
+以上构造函数当中，我们看到Graph只需引入一个参数即OpRegistryInterface或FunctionLibraryDefinition。这两个参数提供了具体每个节点的实际执行定义。在我们构建计算图的时候，我们找到一个node的nodeDef（通常是基于google protocol buffer协议的node参数定义）后，会在OpRegistryInterface或FunctionLibraryDefinition当中去获取其具体的类型实现。也就是说我们如果实现了一个在某硬件平台上优化过了的Op或一种崭新的Op操作，为了将此操作能够作为计算图的一个节点为我们的模型所用，那么需要将此新创建的Op实现函数注册于OpRegistryInterface或FunctionLibraryDefinition结构当中。
+
+
+* 计算图中有对Node与Edge的Add/Remove/Update等操作
+
+其函数接口如下。具体的定义可见于core/graph/graph.cc当中。本身实现起来因为是使用了指针链表结构的DAG所以还是比较简单、容易理解的，在此就不多说了。
+
+'''
+  // Adds a new node to this graph, and returns it. Infers the Op and
+  // input/output types for the node. *this owns the returned instance.
+  // Returns nullptr and sets *status on error.
+  Node* AddNode(const NodeDef& node_def, Status* status);
+
+  // Copies *node, which may belong to another graph, to a new node,
+  // which is returned.  Does not copy any edges.  *this owns the
+  // returned instance.
+  Node* CopyNode(const Node* node);
+
+  // Removes a node from this graph, including all edges from or to it.
+  // *node should not be accessed after calling this function.
+  // REQUIRES: node->IsOp()
+  void RemoveNode(Node* node);
+
+  // Adds an edge that connects the xth output of `source` to the yth input of
+  // `dest` and returns it. Does not update dest's NodeDef.
+  const Edge* AddEdge(Node* source, int x, Node* dest, int y);
+  
+  // Removes edge from the graph. Does not update the destination node's
+  // NodeDef.
+  // REQUIRES: The edge must exist.
+  void RemoveEdge(const Edge* edge);
+  // Updates the input to a node.  The existing edge to `dst` is removed and an
+  // edge from `new_src` to `dst` is created. The NodeDef associated with `dst`
+  // is also updated.
+  Status UpdateEdge(Node* new_src, int new_src_index, Node* dst, int dst_index);
+'''
+
+* 图之上的Op函数库
+
+class graph中有一个类成员为 FunctionLibraryDefinition ops_，其中包含了所有已知的具体类型的Op函数定义。而我们可利用以下函数来增加、拓展其Op函数库。
+'''
+  // Adds the function and gradient definitions in `fdef_lib` to this graph's op
+  // registry. Ignores duplicate functions, and returns a bad status if an
+  // imported function differs from an existing function or op with the same
+  // name.
+  Status AddFunctionLibrary(const FunctionDefLibrary& fdef_lib);
+'''
+
+* Node节点对应的宿主设备
+
+Tensorflow当中计算图的执行是并发的。图上的每个Node都可被分布在不同的计算设备上计算。TF有提供API可以让我们指定某个Op操作的宿主设备。当然也有函数用来提供相应的查询操作。如下所示，见名可知其义。
+'''
+  const string& get_assigned_device_name(const Node& node) const {
+    return device_names_[node.assigned_device_name_index()];
+  }
+
+  void set_assigned_device_name_index(Node* node, int device_name_index) {
+    CheckDeviceNameIndex(device_name_index);
+    node->assigned_device_name_index_ = device_name_index;
+  }
+
+  void set_assigned_device_name(Node* node, const string& device_name) {
+    node->assigned_device_name_index_ = InternDeviceName(device_name);
+  }
+'''
+
+# 参考文献
+* TensorFlow: A System for Large-Scale Machine Learning, 2016
+* https://github.com/tensorflow/tensorflow
