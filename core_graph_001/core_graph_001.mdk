@@ -1,0 +1,208 @@
+Title         : Tensorflow核心代码解析之计算图篇其二：节点与边
+Author        : manofmountain
+Logo          : True
+
+[TITLE]
+
+# 介绍 
+
+计算图本身是一个有向无环图，它主要由一组节点（Node，抽象表示一个Op函数执行）与表示节点之间相互依赖的边（Edge，表示Nodes之间的输入、输出或次序控制依赖关系）组成。
+
+本节当中我们将详细分析Tensorflow里面节点与边的一些实现。
+
+# 节点
+
+以下为Node class在Tensorflow里面的定义。详见：tensorflow/core/graph/graph.h。我们将在其代码中逐个分析其不同的属性与方法。
+
+* 基本方法与属性
+
+```
+class Node {
+ public:
+  string DebugString() const;
+  int id() const { return id_; } // 每个节点都会分配这么一个固定的id，同一副图里面的不同Node有着其唯一的标识id
+  int cost_id() const { return cost_id_; } // 此处主要标明Node 内存分配相关的id，有些Node为ref类型Node，可能其实现当中并不实际分配内存而只是引用其它Node节点里面分配的内存；这样它们将拥有相同的cost_id，它在对图的内存分配优化及优先级策略上有指导、帮助的意义
+  const string& name() const;
+  const string& type_string() const; // 显示不同的type，如有的为Conv，有的为Multmul，还有则为Send或Recv等
+
+  const NodeDef& def() const; //输出Node的protocol buffer definition
+  const OpDef& op_def() const; //输出此Node相关联的Op的protocol buffer definition
+  
+  /* 以下主要为Node的输入、输出Tensor类型、数量及其引用等，容易理解 */
+  // input and output types
+  int32 num_inputs() const;
+  DataType input_type(int32 i) const;
+  const DataTypeVector& input_types() const;
+
+  int32 num_outputs() const;
+  DataType output_type(int32 o) const;
+  const DataTypeVector& output_types() const;
+
+  /* 用户可指定或查询某Node节点执行所用的device，但其在真正执行时，executor只是参考此建议，最终真正所用的device还是由executor综合考虑后决定 */
+  // The device requested by the user.  For the actual assigned device,
+  // use assigned_device_name() below.
+  const string& requested_device() const;
+  // This changes the user requested device but not necessarily the device that
+  // on which the operation will run.
+  void set_requested_device(const string& device);
+
+  // 以下一组函数可用来查询/添加/删除此Node所具有的属性
+  // Read only access to attributes
+  AttrSlice attrs() const;
+  template <typename T>
+  void AddAttr(const string& name, const T& val) {
+    SetAttrValue(val, AddAttrHelper(name));
+  }
+  void ClearAttr(const string& name);
+  // Inputs requested by the NodeDef.  For the actual inputs, use in_edges.
+  const protobuf::RepeatedPtrField<string>& requested_inputs() const;
+
+  //以下为一组功能函数，具体来查询输入、输出的Edges/Nodes，并使用不同的数据结构返回，因为此类操作在Tensorflow中使用非常频繁，因此需要考虑数据结构的效率、内存使用等特点
+  // Get the neighboring nodes via edges either in or out of this node.  This
+  // includes control edges.
+  gtl::iterator_range<NeighborIter> in_nodes() const;
+  gtl::iterator_range<NeighborIter> out_nodes() const;
+  const EdgeSet& in_edges() const { return in_edges_; }
+  const EdgeSet& out_edges() const { return out_edges_; }
+  // Returns into '*n' the node that has an output connected to the
+  // 'idx' input of this Node.
+  Status input_node(int idx, const Node** n) const;
+  Status input_node(int idx, Node** n) const;
+
+private:
+  friend class Graph; //Graph与Node经常会相互调用彼此函数，这里设为友类
+  Node();
+
+  NodeProperties* properties() const { return props_.get(); }
+
+  void Initialize(int id, int cost_id, std::shared_ptr<NodeProperties> props);
+
+  // Releases memory from props_, in addition to restoring *this to its
+  // uninitialized state.
+  void Clear();
+}；
+```
+* 节点类型
+
+Tensorflow的程序设计当中，一切计算、控制操作都会由节点来表示。因此不只像传统意义上大家认为构成主要模型的Conv/Relu/Matmul/FC等计算操作被表示为节点，其它像变量初始化(VARIABLE），常量赋值等操作都会有相应的Node节点存在在图中。然后由Session统一驱动执行。这就是静态图构建与执行的基本原理。
+
+以下为所有的节点类型。我们平时说的Conv/Relu/Matmul/BN等计算节点都被归于NC_OTHER里面。。而其它在这里有名有姓的则为图上的控制节点，也称为特殊节点。
+
+```
+  // A set of mutually exclusive classes for different kinds of nodes,
+  // class_ is initialized in the Node::Initialize routine based on the
+  // node's type_string().
+  enum NodeClass {
+    NC_UNINITIALIZED,
+    NC_SWITCH,
+    NC_MERGE,
+    NC_ENTER,
+    NC_EXIT,
+    NC_NEXT_ITERATION,
+    NC_LOOP_COND,
+    NC_CONTROL_TRIGGER,
+    NC_SEND,
+    NC_HOST_SEND,
+    NC_RECV,
+    NC_HOST_RECV,
+    NC_CONSTANT,
+    NC_VARIABLE,
+    NC_IDENTITY,
+    NC_GET_SESSION_HANDLE,
+    NC_GET_SESSION_TENSOR,
+    NC_DELETE_SESSION_TENSOR,
+    NC_METADATA,
+    NC_SCOPED_ALLOCATOR,
+    NC_COLLECTIVE,
+    NC_OTHER  // Not a special kind of node
+  };
+
+```
+
+* 节点输入/输出
+
+以下两个结构分别抽象表示Node的输入、输出张量（Tensor），本质上Tensorflow图上流动的正是如此一个个Input/Output tensors。
+```
+// Represents an input of a node, i.e., the `index`-th input to `node`.
+struct InputTensor {
+  const Node* node;
+  int index;
+  InputTensor(const Node* n, int i) : node(n), index(i) {}
+  InputTensor() : node(nullptr), index(0) {}
+};
+
+// Represents an output of a node, i.e., the `index`-th output of `node`. Note
+// that a single `OutputTensor` can correspond to multiple `Edge`s if the output
+// is consumed by multiple destination nodes.
+struct OutputTensor {
+  const Node* node;
+  int index;
+  OutputTensor(const Node* n, int i) : node(n), index(i) {}
+  OutputTensor() : node(nullptr), index(0) {}
+};
+```
+
+* 节点属性
+
+tf中每个节点的属性包含其输入、输出Tensors的类型以及此节点的protocol定义NodeDef及其所关联的Op的定义OpDef。
+
+```
+class NodeProperties {
+ public:
+  NodeProperties(const OpDef* op_def, const NodeDef& node_def,
+                 const DataTypeSlice inputs, const DataTypeSlice outputs)
+      : op_def(op_def),
+        node_def(node_def),
+        input_types(inputs.begin(), inputs.end()),
+        output_types(outputs.begin(), outputs.end()) {}
+
+  const OpDef* op_def;  // not owned
+  NodeDef node_def;
+  const DataTypeVector input_types;
+  const DataTypeVector output_types;
+};
+```
+
+# 边
+
+在下面我们从class Edge的代码里来分析下TF中边的实现。详细可见：tensorflow/core/graph/graph.h
+
+```
+class Edge {
+ public:
+ //我们介绍过边表示Nodes之间的依赖关系，此处即为dst节点执行所需的某个输入依赖于来自src节点的某个输出或者作为控制边要求src节点的执行先于节点dst完成
+  Node* src() const { return src_; }
+  Node* dst() const { return dst_; }
+  int id() const { return id_; } //TF Graph当中与Node一样，每个边也有其唯一的标识id
+
+  // Return the index of the source output that produces the data
+  // carried by this edge.  The special value kControlSlot is used
+  // for control dependencies.
+  int src_output() const { return src_output_; }
+
+  // Return the index of the destination input that consumes the data
+  // carried by this edge.  The special value kControlSlot is used
+  // for control dependencies.
+  int dst_input() const { return dst_input_; }
+
+  // Return true iff this is an edge that indicates a control-flow
+  // (as opposed to a data-flow) dependency.
+  bool IsControlEdge() const;
+
+  string DebugString() const;
+private:
+  Edge() {}
+
+  friend class EdgeSetTest;
+  friend class Graph;
+  Node* src_;
+  Node* dst_;
+  int id_;
+  int src_output_;
+  int dst_input_;
+};
+```
+
+# 参考文献
+
+* https://github.com/tensorflow
