@@ -10,7 +10,7 @@ Logo          : True
 
 本节中我们将着力于从细节上讲述GraphDef到Graph的转换即实际可执行图——Graph的构建。
 
-# 两个关键的转换函数
+# 两个关键的构建函数
 
 从GraphDef到Graph有两个函数可以使用，分别为ConvertGraphDefToGraph和ImportGraphDef。其中前者ConverGraphDefToGraph函数主要用来使用一个输入的GraphDef为参数从头构建出一个完整的Graph出来。而后者ImportGraphDef则用于使用输入的GraphDef来扩充已有的Graph类，以来扩展它的组成。下面我们分别讲述这两个函数，详细可见：tensorflow/core/graph/graph_constructor.h
 
@@ -48,13 +48,225 @@ Status ConvertGraphDefToGraph(const GraphConstructorOptions& opts,
 }
 ```
 
-Madoko is a fast markdown processor for writing professional articles
-with a focus on simplicity and plain text readability.
+以下是GraphConstructor的主要构成。它里面有个inner的struct Options，主要用来获得我们上述中所说过的外部的struct GraphConstructorOptions（还有下文将提到的ImportGraphDefOptions）里面的配置项。
 
-* Read the [reference manual].
-* Explore the upper-right toolbox menu to discover how Markdown works. 
-* `Alt-Q` reformats the current paragraph.
+我们能从下面代码中看出所有真正的Import GraphDef，然后进行检查合理性，安全性，然后再逐步建立Graph里的数据结构的一系列过程都在TryImport这个函数里面可见到。
 
-Enjoy!
+```
+class GraphConstructor {
+ public:
+  struct Options {
+    Options(const GraphConstructorOptions& in)  // NOLINT(runtime/explicit)
+        : allow_internal_ops(in.allow_internal_ops),
+          expect_device_spec(in.expect_device_spec),
+          importing(false),
+          validate_colocation_constraints(false) {}
+    Options(const ImportGraphDefOptions& in)  // NOLINT(runtime/explicit)
+        : allow_internal_ops(false),
+          expect_device_spec(false),
+          prefix(in.prefix.empty() || str_util::EndsWith(in.prefix, "/")
+                     ? in.prefix
+                     : in.prefix + "/"),
+          uniquify_names(in.uniquify_names),
+          uniquify_prefix(in.uniquify_prefix),
+          input_map(in.input_map),
+          skip_mapped_nodes(in.skip_mapped_nodes),
+          control_dependencies(in.control_dependencies),
+          return_tensors(in.return_tensors),
+          return_nodes(in.return_nodes),
+          importing(true),
+          validate_colocation_constraints(in.validate_colocation_constraints),
+          validate_shape(in.validate_shape) {}
+    //以下两个由GraphConstructorOptions提供
+    bool allow_internal_ops;
+    bool expect_device_spec;
+    
+    //以下一些则由ImportGraphOptions来提供
+    string prefix;
+    bool uniquify_names;
+    bool uniquify_prefix;
+    std::map<TensorId, TensorId> input_map;
+    bool skip_mapped_nodes;
+    std::vector<string> control_dependencies;
+    std::vector<TensorId> return_tensors;
+    std::vector<string> return_nodes;
+    bool importing;
+    bool validate_colocation_constraints;
+    bool validate_shape = true;
+    };
+    
+    //以下为具体做construct的函数
+    static Status Construct(
+      const Options& opts, NodeDefSlice node_defs, const VersionDef* versions,
+      const FunctionDefLibrary* library, Graph* g, ShapeRefiner* refiner,
+      std::vector<std::pair<Node*, int>>* return_tensors,
+      std::vector<Node*>* return_nodes,
+      std::vector<TensorId>* missing_unused_input_map_keys) {
+    if (versions) {
+      TF_RETURN_IF_ERROR(CheckVersions(*versions, TF_GRAPH_DEF_VERSION,
+                                       TF_GRAPH_DEF_VERSION_MIN_PRODUCER,
+                                       "GraphDef", "graph"));
+    }
+    GraphConstructor c(opts, node_defs, versions, library, g, refiner,
+                       return_tensors, return_nodes,
+                       missing_unused_input_map_keys);
+    const Status s = c.TryImport();
+    if (!s.ok()) c.Undo();
+    return s;
+  }
+  
+  //所有真正Import GraphDef并构建Graph的一些过程序列
+  Status TryImport() {
+    TF_RETURN_IF_ERROR(EnsureNoNameCollisions());
+    TF_RETURN_IF_ERROR(ValidateInputMapAndControlDependencies());
+    TF_RETURN_IF_ERROR(BuildNodeIndex());
+    TF_RETURN_IF_ERROR(InitFromEdges());
+    TF_RETURN_IF_ERROR(Convert());
+    TF_RETURN_IF_ERROR(AddBackEdges());
+    TF_RETURN_IF_ERROR(UpdateVersionDef());
+    TF_RETURN_IF_ERROR(PopulateReturnTensors());
+    TF_RETURN_IF_ERROR(PopulateReturnNodes());
+    TF_RETURN_IF_ERROR(PopulateMissingUnusedInputMapKeys());
+    UpdateUniquifiedColocationNames();
+    FixupSourceAndSinkEdges(g_);
+    return Status::OK();
+  }
 
-[reference manual]: http://research.microsoft.com/en-us/um/people/daan/madoko/doc/reference.html  "Madoko reference manual"
+};
+
+```
+
+* ImportGraphDef
+
+如上所述，此函数主要用来扩展已有的图Graph结构，在里面添加新的节点，扩展原Graph功能。
+
+```
+// Adds the graph in GraphDef `gdef` into an existing Graph `*g`.
+//
+// On error, returns non-OK and leaves `*g` unmodified.
+//
+// `refiner` can be null. It should be non-null if the caller
+// intends to add additional nodes to the graph after the import. This
+// allows the caller to validate shapes of those nodes (since
+// ShapeRefiner::AddNode must be called in topological order).
+//
+// `results` must be non-null if `opts.return_tensors` or `opts.result_nodes` is
+// non-empty. It can also be set to fetch the unused input map keys. If it's
+// non-null, all the vector fields must be empty.
+extern Status ImportGraphDef(const ImportGraphDefOptions& opts,
+                             const GraphDef& gdef, Graph* g,
+                             ShapeRefiner* refiner,
+                             ImportGraphDefResults* results = nullptr);
+```
+
+它同除了应有的GraphDef与Graph外，还有一个配置项参数ImportGraphDefOptions与一个ShapeRefiner参数，主要用来保证在此函数调用中当有新的节点被加入到原Graph中时，保证节点间的输入、输出的Shape相互匹配。此外ImportGraphDefResults函数则主要用来输出此图中的输出节点与输出张量。
+
+首先我们来看下ImportGraphDefOptions里面都包含哪些配置项。
+
+```
+struct ImportGraphDefOptions {
+  ImportGraphDefOptions()
+      : uniquify_names(false),
+        uniquify_prefix(false),
+        skip_mapped_nodes(false),
+        validate_shape(true) {}
+  
+  //prefix, uniquify_names, uniquify_prefix这三个参数主要用于保证对来自GraphDef的新增节点其命名不与Graph中的原有节点相冲突。另外就是如果有冲突的话应当如何来处理。
+  
+  // Name prefix to use for nodes imported from the GraphDef.  For example, if
+  // prefix="animals" and GraphDef contains a node "bunny" then the node will be
+  // named "animals/bunny" in *g. Must not be already used as a node name or
+  // prefix in the graph.
+  string prefix;
+  // If true, imported node names will be modified if their name already exists
+  // in the graph. If false, conflicting names will be treated as an error. Note
+  // that this option has no effect if `prefix` is specified, since `prefix`
+  // will guarantee all node names are unique.
+  bool uniquify_names;
+  // If true, `prefix` will be modified if it already exists as a node name or
+  // prefix in the graph. If false, a conflicting prefix will be treated as an
+  // error. This option has no effect if `prefix` isn't specified.
+  bool uniquify_prefix;
+  
+  //具体构建新节点时，作为intermediate结构来保存NodeDef TensorId到Graph中Node里TensorId间的映射。
+  // Maps tensors in `gdef` to existing tensors in `g`. Inputs in `gdef`
+  // corresponding to `input_map` keys will be remapped to the nodes in `g`
+  // corresponding to the values.
+  //
+  // Keys should not include `prefix`, i.e., a key TensorId's name should be the
+  // name as it originally appears in `gdef`.
+  //
+  // If this is non-empty, ImportGraphDef must be called with the shape refiner
+  // used to create the existing nodes referenced in `input_map`.
+  std::map<TensorId, TensorId> input_map;
+
+  // If true, nodes that will have all output edges removed because of
+  // overrides in `input_map` will not be imported.
+  bool skip_mapped_nodes;
+
+  // The names of existing nodes in `g` that the imported graph should have
+  // control dependencies on.
+  //
+  // Note that to avoid creating many redundant control edges, ImportGraphDef()
+  // won't add control edges to nodes that will inherit the dependencies from
+  // other nodes in `gdef`.
+  std::vector<string> control_dependencies;
+
+  // Tensors in `gdef` that will be returned via the ImportGraphDefResults
+  // output parameter of `ImportGraphDef()`. If this list is non-empty, the
+  // caller must pass a results object to `ImportGraphDef()`. The
+  // `return_tensors` field will be populated with the imported nodes in `g`.
+  //
+  // Entries should not include `prefix`, i.e., each TensorId's name should be
+  // the name as it originally appears in `gdef`.
+  //
+  // If this contains a tensor that's also being remapped via `input_map`, the
+  // corresponding existing tensor in `g` will be returned.
+  std::vector<TensorId> return_tensors;
+
+  // The names of nodes in `gdef` that will be returned via the
+  // ImportGraphDefResults output parameter of `ImportGraphDef()`. If this list
+  // is non-empty, the caller must pass a results object to
+  // `ImportGraphDef()`. The `return_nodes` field will be populated with the
+  // imported nodes in `g`.
+  //
+  // Entries should not include `prefix`, i.e., each node's name should be the
+  // name as it originally appears in `gdef`.
+  //
+  // Unlike `return_tensors`, `input_map` has no effect on the nodes
+  // returned. `return_nodes` must be empty if `skip_mapped_nodes` is true.
+  std::vector<string> return_nodes;
+
+  // If true, checks that all colocation constraints are nodes in the GraphDef.
+  bool validate_colocation_constraints = true;
+
+  // If false skips shape validation.
+  bool validate_shape;
+};
+```
+
+不得不佩服Google工程师的代码清晰度。而且它们的注释给的也挺恰当。读其代码，真以其人亦当为风度翩翩之清爽公子亦！
+
+下面再简单看下ImportGraphDefResults的结构。其注释及结构成员命名已经足以说明问题了，不再详解，亦无必要了。:)
+
+```
+struct ImportGraphDefResults {
+  // The requested tensors associated with
+  // ImportGraphDefOptions::return_tensors. Note that the index may be different
+  // than the requested index if the returned tensor has been remapped according
+  // to `input_map`.
+  typedef int Index;
+  std::vector<std::pair<Node*, Index>> return_tensors;
+
+  // The requested nodes associated with ImportGraphDefOptions::return_nodes.
+  std::vector<Node*> return_nodes;
+
+  // Keys in ImportGraphDefOptions::input_map that don't appear in `gdef` and
+  // weren't used as an input to any node in `gdef`. These keys are likely due
+  // to typos, and callers may wish to treat their existence as an error.
+  std::vector<TensorId> missing_unused_input_map_keys;
+};
+```
+
+# 参考文献
+* https://github.com/tensorflow
