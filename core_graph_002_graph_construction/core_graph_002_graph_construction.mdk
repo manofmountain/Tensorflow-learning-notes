@@ -1,0 +1,60 @@
+Title         : Tensorflow核心代码解析之计算图篇其三：图的构建
+Author        : manofmountain
+Logo          : True
+
+[TITLE]
+
+# 介绍
+
+如果你翻过Tensorflow的核心代码，一定会奇怪表示图的class如此之多像GraphDef/Graph等。通常GraphDef表示一组与Graph相关的属性Jason对（本质上是Graph的Protocol buffer表示）。而真正Executor所执行计算的是Graph。一般我们用户使用高级语言像Python所构建好的graph模型，会在底下悄悄地生成一个由GraphDef表示的图结构来。然后我们使用Python等语言里的Session具体去分配内存，初使化参数，运行计算图时，TF的后端会将我们前一部所构建的GraphDef转化为一个可执行的Graph。
+
+本节中我们将着力于从细节上讲述GraphDef到Graph的转换即实际可执行图——Graph的构建。
+
+# 两个关键的转换函数
+
+从GraphDef到Graph有两个函数可以使用，分别为ConvertGraphDefToGraph和ImportGraphDef。其中前者ConverGraphDefToGraph函数主要用来使用一个输入的GraphDef为参数从头构建出一个完整的Graph出来。而后者ImportGraphDef则用于使用输入的GraphDef来扩充已有的Graph类，以来扩展它的组成。下面我们分别讲述这两个函数，详细可见：tensorflow/core/graph/graph_constructor.h
+
+* ConvertGraphDefToGraph
+
+我们可以看到此函数中处了必需的两个参数GraphDef与Graph外还有一个参数叫GraphConstructorOptions。这个选项结构里面包含了所有用于指导此转换进行的选项参数。随着对Tensorflow core code了解的增多，我们会看到愈来愈多的此类将所有函数参数与配置项放入一个Option struct/class里面的做法。
+
+```
+struct GraphConstructorOptions {
+  GraphConstructorOptions() {}
+
+  // If true, allows internal ops in the GraphDef.
+  bool allow_internal_ops = false;
+
+  // If true, the graph def is expected to have fully specified
+  // devices for all nodes. A node in the resulting graph "g" has the
+  // device name set accordingly.
+  bool expect_device_spec = false;
+};
+extern Status ConvertGraphDefToGraph(const GraphConstructorOptions& opts,
+                                     const GraphDef& gdef, Graph* g);
+
+```
+
+去tensorflow/core/graph/graph_constructor.cc里面查看此函数的定义，我们会发现原来其具体实现将依靠更深一层次的class GraphConstructor来完成。如下是它的实现：
+
+```
+Status ConvertGraphDefToGraph(const GraphConstructorOptions& opts,
+                              const GraphDef& gdef, Graph* g) {
+  ShapeRefiner refiner(gdef.versions().producer(), g->op_registry());
+  return GraphConstructor::Construct(
+      opts, gdef.node(), &gdef.versions(), &gdef.library(), g, &refiner,
+      /*return_tensors=*/nullptr, /*return_nodes=*/nullptr,
+      /*missing_unused_input_map_keys=*/nullptr);
+}
+```
+
+Madoko is a fast markdown processor for writing professional articles
+with a focus on simplicity and plain text readability.
+
+* Read the [reference manual].
+* Explore the upper-right toolbox menu to discover how Markdown works. 
+* `Alt-Q` reformats the current paragraph.
+
+Enjoy!
+
+[reference manual]: http://research.microsoft.com/en-us/um/people/daan/madoko/doc/reference.html  "Madoko reference manual"
