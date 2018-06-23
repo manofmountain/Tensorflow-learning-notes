@@ -1,0 +1,20 @@
+Title         : Tensorflow核心代码解析之计算图篇其四：图的构建之二
+Author        : manofmountain
+Logo          : True
+
+[TITLE]
+
+# 介绍
+
+在上篇“Tensorflow核心代码解析之计算图篇其三：图的构建”中，我们有讲过TF里面是如何将一个GraphDef转换为真正执行所用的Graph的。现在我们理解为我们使用TF 上层API构建出的深度学习模型是生成了GraphDef，然后再进一步由上篇讲过的两个函数（ConvertGraphDefToGraph和ImportGraphDef）之一生成Graph的。
+但是实际上，TF内部的实现并非如此即"High level API 写的程序 -> 生成一张GraphDef表示的图 -> 转换为最终执行计算所用的Graph"。
+
+它实际的转换步骤有些小Tricky，是这样进行的。先是High level API写程序时直接构成Graph -> 转换为由GraphDef表示的图 -> 再变换为最终执行所需的Graph。 注意在此步骤序列当中，第三步最终生成出来的Graph与第一步直接由我们用API所描述的Graph是不相同的，它有经过ConvertGraphDefToGraph时，多加了一些功能部分像BackEdges，Source/Sink节点以及这两个特殊节点与原图之间的边，还有一些完全检查、约束等等。
+
+本章当中，我们主要分析下TF里面如何在前端使用那些High level API在底层构建Graph，然后再转换为GraphDef的。它的主要实现可见于class GraphDefBuilder 当中。详细内容可见于tensorflow/core/graph/graph_constructor.h与tensorflow/core/graph/graph_constructor.cc。
+
+# Graph的初步构建
+
+GraphDefBuilder类实现了大部分由前端API构建出底层的初步Graph这一工作。它在完成这一工作时具体又使用了像NodeBuilder这样的负责某一节点构建的类的功能。至于从初步生成的Graph到GraphDef这一步骤转换则主要由我们此系列文章中第一篇所介绍过的class Graph来完成。
+
+* GraphDefBuilder
